@@ -41,7 +41,7 @@ def universal_generator_node(state: AgentState):
     
     # Using Gemini 2.0 Flash
     response = client.models.generate_content(
-        model="gemini-2.0-flash", 
+        model="gemini-2.5-flash", 
         contents=prompt_parts
     )
     return {"answer": response.text, "attempts": state['attempts'] + 1}
@@ -57,7 +57,7 @@ def judge_node(state: AgentState):
     
     # Using Gemini 1.5 Flash for the Judge to save costs/latency
     response = client.models.generate_content(
-        model="gemini-1.5-flash", 
+        model="gemini-3-flash-preview", 
         contents=[*state['media_handles'], eval_prompt]
     )
     
