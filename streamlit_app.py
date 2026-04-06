@@ -30,19 +30,20 @@ class AgentState(TypedDict):
 # --- 3. NODE LOGIC (SYNCHRONOUS FOR STABILITY) ---
 
 def universal_generator_node(state: AgentState):
-    """Generates a technical audit based on assets and previous feedback."""
-    revision_context = f"\nPREVIOUS AUDIT FEEDBACK (Fix these issues): {state['feedback']}" if state.get('feedback') else ""
+    revision = f"\nPREVIOUS FEEDBACK: {state['feedback']}" if state.get('feedback') else ""
     
-    prompt_parts = [
-        "SYSTEM: You are a Universal Technical Auditor. Analyze the provided assets and answer the user query with high technical precision.",
+    # NEW: Stronger instructions to force file analysis
+    content_parts = [
+        "SYSTEM: You are a Technical Auditor. MANDATORY RULE: You must base your analysis "
+        "directly on the uploaded files. If a 'requirements.txt' or code file is provided, "
+        "audit its contents specifically in relation to the user's query.",
         *state['media_handles'],
-        f"USER QUERY: {state['question']} {revision_context}"
+        f"USER QUERY: {state['question']} {revision}"
     ]
-    
-    # Using Gemini 2.0 Flash
+
     response = client.models.generate_content(
-        model="gemini-2.5-flash", 
-        contents=prompt_parts
+        model="gemini-2.0-flash", 
+        contents=content_parts
     )
     return {"answer": response.text, "attempts": state['attempts'] + 1}
 
