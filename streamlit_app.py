@@ -1,22 +1,23 @@
 import streamlit as st
-import os, re, asyncio, uuid
+import os, re, uuid, time
 from typing import List, TypedDict
 from google import genai
 from langgraph.graph import StateGraph, END
 from dotenv import load_dotenv
 
 # --- 1. INITIALIZATION ---
+# load_dotenv() handles local .env files; st.secrets handles Streamlit Cloud
 load_dotenv()
-# Logic: Use .env key if available, otherwise use Streamlit Cloud Secrets
 API_KEY = os.getenv("GOOGLE_API_KEY") or st.secrets.get("GOOGLE_API_KEY")
 
 if not API_KEY:
-    st.error("Missing API Key. Add it to Streamlit Secrets or .env")
+    st.error("Missing API Key. Please add GOOGLE_API_KEY to your Streamlit Secrets or .env file.")
     st.stop()
 
+# Initialize the Google GenAI Client
 client = genai.Client(api_key=API_KEY)
 
-# --- 2. UNIVERSAL STATE (UNTOUCHED LOGIC) ---
+# --- 2. UNIVERSAL STATE DEFINITION ---
 class AgentState(TypedDict):
     question: str
     answer: str
@@ -26,66 +27,136 @@ class AgentState(TypedDict):
     history: List[dict]
     feedback: str
 
-# --- 3. NODES (UNTOUCHED LOGIC) ---
-async def universal_generator_node(state: AgentState):
-    revision = f"\nPREVIOUS FEEDBACK: {state['feedback']}" if state.get('feedback') else ""
+# --- 3. NODE LOGIC (SYNCHRONOUS FOR STABILITY) ---
+
+def universal_generator_node(state: AgentState):
+    """Generates a technical audit based on assets and previous feedback."""
+    revision_context = f"\nPREVIOUS AUDIT FEEDBACK (Fix these issues): {state['feedback']}" if state.get('feedback') else ""
+    
     prompt_parts = [
-        "SYSTEM: You are a Universal Technical Auditor.",
+        "SYSTEM: You are a Universal Technical Auditor. Analyze the provided assets and answer the user query with high technical precision.",
         *state['media_handles'],
-        f"USER QUESTION: {state['question']} {revision}"
+        f"USER QUERY: {state['question']} {revision_context}"
     ]
-    response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt_parts)
+    
+    # Using Gemini 2.0 Flash
+    response = client.models.generate_content(
+        model="gemini-2.0-flash", 
+        contents=prompt_parts
+    )
     return {"answer": response.text, "attempts": state['attempts'] + 1}
 
-async def judge_node(state: AgentState):
-    eval_prompt = f"Score (0-10000) and Critique. Format: SCORE: [int] CRITIQUE: [str]\nRESPONSE: {state['answer']}"
-    response = client.models.generate_content(model="gemini-3.1-flash-lite-preview", contents=[*state['media_handles'], eval_prompt])
+def judge_node(state: AgentState):
+    """Evaluates the generator's output and provides a score."""
+    eval_prompt = (
+        f"Critically audit the following response for technical accuracy. "
+        f"Return a score between 0 and 10000. "
+        f"Format: SCORE: [number] CRITIQUE: [text]\n\n"
+        f"RESPONSE TO AUDIT: {state['answer']}"
+    )
     
+    # Using Gemini 1.5 Flash for the Judge to save costs/latency
+    response = client.models.generate_content(
+        model="gemini-1.5-flash", 
+        contents=[*state['media_handles'], eval_prompt]
+    )
+    
+    # Extract Score and Feedback using Regex
     score_match = re.search(r'SCORE:\s*(\d+)', response.text)
     score = int(score_match.group(1)) if score_match else 0
-    critique = re.search(r'CRITIQUE:\s*(.*)', response.text).group(1) if "CRITIQUE:" in response.text else "No feedback."
+    
+    critique_match = re.search(r'CRITIQUE:\s*(.*)', response.text, re.DOTALL)
+    critique = critique_match.group(1).strip() if critique_match else "No specific critique provided."
     
     return {
-        "score": score, "feedback": critique,
-        "history": state.get('history', []) + [{"score": score, "answer": state['answer']}]
+        "score": score, 
+        "feedback": critique,
+        "history": state.get('history', []) + [{"attempt": state['attempts'], "score": score, "feedback": critique}]
     }
 
-# --- 4. GRAPH CONSTRUCTION (UNTOUCHED LOGIC) ---
+# --- 4. LANGGRAPH ORCHESTRATION ---
+
 workflow = StateGraph(AgentState)
+
+# Add Nodes
 workflow.add_node("generator", universal_generator_node)
 workflow.add_node("judge", judge_node)
+
+# Define Edges
 workflow.set_entry_point("generator")
 workflow.add_edge("generator", "judge")
-workflow.add_conditional_edges("judge", lambda x: END if x['score'] >= 8500 or x['attempts'] >= 3 else "generator")
+
+# Conditional Logic: Loop back if score < 8500 and attempts < 3
+def should_continue(state: AgentState):
+    if state['score'] >= 8500 or state['attempts'] >= 3:
+        return END
+    return "generator"
+
+workflow.add_conditional_edges("judge", should_continue)
+
+# Compile the Graph
 app_compiled = workflow.compile()
 
-# --- 5. PRODUCTION UI ---
-st.set_page_config(page_title="Synapse-Native Omni", layout="wide")
+# --- 5. STREAMLIT PRODUCTION UI ---
+
+st.set_page_config(page_title="Synapse-Native Omni", page_icon="🤖", layout="wide")
+
 st.title("🤖 Synapse-Native: Universal Technical Auditor")
+st.markdown("---")
 
-uploaded_files = st.sidebar.file_uploader("Upload Assets (PDF, JPG, MP3)", accept_multiple_files=True)
+# Sidebar for Asset Uploads
+with st.sidebar:
+    st.header("1. Upload Context")
+    uploaded_files = st.file_uploader(
+        "Upload files (PDF, Images, Audio, Video)", 
+        accept_multiple_files=True
+    )
+    st.info("Files are processed securely via Gemini File API.")
 
-if query := st.chat_input("Enter your technical query..."):
+# Main Chat Interface
+if query := st.chat_input("What would you like me to audit?"):
     if not uploaded_files:
-        st.warning("Please upload files to proceed.")
+        st.warning("⚠️ Please upload at least one asset in the sidebar to provide context for the audit.")
     else:
-        with st.status("🔍 Executing Agentic Audit Loop...") as status:
+        with st.status("🚀 Initializing Agentic Audit Loop...") as status:
+            # Step A: Handle Gemini File Uploads
             handles = []
             for f in uploaded_files:
-                temp_name = f"tmp_{uuid.uuid4()}_{f.name}"
-                with open(temp_name, "wb") as b: b.write(f.getvalue())
-                h = client.files.upload(file=temp_name)
+                temp_file = f"temp_{uuid.uuid4()}_{f.name}"
+                with open(temp_file, "wb") as buffer:
+                    buffer.write(f.getvalue())
+                
+                # Upload to Gemini
+                h = client.files.upload(file=temp_file)
                 while h.state.name == "PROCESSING":
-                    asyncio.run(asyncio.sleep(2))
+                    time.sleep(2)
                     h = client.files.get(name=h.name)
+                
                 handles.append(h)
-                os.remove(temp_name)
+                os.remove(temp_file) # Clean up local storage
 
-            final_state = asyncio.run(app_compiled.ainvoke({
-                "question": query, "media_handles": handles, "attempts": 0, 
-                "history": [], "score": 0, "feedback": ""
-            }))
+            # Step B: Execute LangGraph (Synchronous Invoke)
+            status.update(label="🧠 Analyzing and Judging (Multi-step loop)...")
             
-            status.update(label=f"Audit Complete! Final Score: {final_state['score']}", state="complete")
-            st.markdown(final_state['answer'])
-            with st.expander("Audit Logs"): st.json(final_state['history'])
+            initial_state = {
+                "question": query, 
+                "media_handles": handles, 
+                "attempts": 0, 
+                "history": [], 
+                "score": 0, 
+                "feedback": ""
+            }
+            
+            final_output = app_compiled.invoke(initial_state)
+            
+            status.update(label=f"✅ Audit Complete! Final Score: {final_output['score']}/10000", state="complete")
+
+            # Step C: Display Results
+            st.subheader("Final Technical Audit")
+            st.markdown(final_output['answer'])
+            
+            with st.expander("View Agent Reasoning & Iteration Logs"):
+                for entry in final_output['history']:
+                    st.write(f"**Attempt {entry['attempt']}** | **Score:** {entry['score']}")
+                    st.write(f"*Feedback:* {entry['feedback']}")
+                    st.divider()
