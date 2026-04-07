@@ -1,5 +1,5 @@
 import streamlit as st
-import os, re, uuid, time
+import os, re, uuid, time, itertools
 from typing import List, TypedDict
 from google import genai
 from google.genai import types 
@@ -13,7 +13,7 @@ load_dotenv()
 API_KEY = os.getenv("GOOGLE_API_KEY") or st.secrets.get("GOOGLE_API_KEY")
 
 if not API_KEY:
-    st.error("Missing API Key. Please verify your environment or .env file.")
+    st.error("Missing API Key.")
     st.stop()
 
 client = genai.Client(api_key=API_KEY)
@@ -30,11 +30,18 @@ class AgentState(TypedDict):
     gen_model: str 
     judge_model: str 
 
-# --- 3. MODEL LIST & SAFETY SETTINGS ---
+# --- 3. FULL MODEL LIST ---
 FULL_MODEL_LIST = [
-    "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-2.5-flash", 
-    "gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview",
-    "gemma-3-27b-it", "gemma-3n-e4b-it", "gemini-flash-latest"
+    "gemini-2.0-flash", "gemini-2.0-flash-001", "gemini-2.0-flash-lite",
+    "gemini-2.0-flash-lite-001", "gemini-2.0-flash-exp-image-generation",
+    "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite",
+    "gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts",
+    "gemini-2.5-flash-image", "gemini-2.5-flash-lite-preview-09-2025",
+    "gemini-3-flash-preview", "gemini-3-pro-preview", "gemini-3.1-pro-preview",
+    "gemini-3.1-pro-preview-customtools", "gemini-3.1-flash-lite-preview",
+    "gemma-3-1b-it", "gemma-3-4b-it", "gemma-3-12b-it", "gemma-3-27b-it",
+    "gemma-3n-e2b-it", "gemma-3n-e4b-it", "gemini-flash-latest",
+    "gemini-pro-latest"
 ]
 
 safety_config = [
@@ -46,18 +53,12 @@ safety_config = [
 
 # --- 4. NODE LOGIC ---
 def universal_generator_node(state: AgentState):
-    # STRICT PERSONA GUARD: Rejects unstructured, casual, or non-technical queries
-    guard_prompt = (
-        "SYSTEM: You are a Senior Technical Auditor. Your protocol is as follows:\n"
-        "1. Evaluate if the User Query possesses a formal technical structure and professional persona.\n"
-        "2. If the query is casual, lacks a clear objective, or is a simple acknowledgment (e.g., 'ok', 'hi'), "
-        "respond ONLY with the exact phrase: 'STRUCTURE_INVALID'.\n"
-        "3. Otherwise, perform a rigorous, evidence-based technical audit of the attached files."
-    )
-    
-    revision = f"\nQA FEEDBACK FROM PREVIOUS ATTEMPT: {state['feedback']}" if state.get('feedback') else ""
-    content_parts = [guard_prompt, *state['media_handles'], f"OBJECTIVE: {state['question']} {revision}"]
-    
+    # CHANGE: Added instruction to verify structure and persona
+    content_parts = [
+        "SYSTEM: You are a Technical Auditor. If the user query lacks a proper technical structure or a professional persona, respond ONLY with: 'STRUCTURE_INVALID'. Otherwise, proceed with the audit.",
+        *state['media_handles'], 
+        state['question']
+    ]
     try:
         response = client.models.generate_content(
             model=state['gen_model'], contents=content_parts,
@@ -65,37 +66,24 @@ def universal_generator_node(state: AgentState):
         )
         return {"answer": response.text, "attempts": state['attempts'] + 1}
     except Exception as e:
-        return {"answer": f"⚠️ Generator Error: {str(e)}", "attempts": state['attempts'] + 1}
+        return {"answer": f"⚠️ Error: {str(e)}", "attempts": state['attempts'] + 1}
 
 def judge_node(state: AgentState):
-    # Short-circuit logic for invalid structures
+    # CHANGE: Short-circuit if structure was invalid
     if "STRUCTURE_INVALID" in state['answer']:
-        return {
-            "score": 10000, 
-            "feedback": "Query rejected: Fails structural/persona validation.", 
-            "history": state.get('history', [])
-        }
+        return {"score": 10000, "feedback": "Rejected: Invalid structure/persona"}
 
-    eval_prompt = (
-        f"ACT AS: Lead QA Judge. Audit the response for technical depth and accuracy.\n"
-        f"Return SCORE: [0-10000] and CRITIQUE: [text].\n\n"
-        f"AUDIT DATA: {state['answer']}"
-    )
+    eval_prompt = f"SCORE: [0-10000] CRITIQUE: [text]\n\nRESPONSE: {state['answer']}"
     try:
         response = client.models.generate_content(
             model=state['judge_model'], contents=[eval_prompt],
             config=types.GenerateContentConfig(safety_settings=safety_config)
         )
         score_match = re.search(r'SCORE:\s*(\d+)', response.text)
-        score = int(score_match.group(1)) if score_match else 0
-        
-        # Log entry for persistent rendering
-        log_entry = {"attempt": state['attempts'] - 1, "score": score, "critique": response.text}
-        return {"score": score, "feedback": response.text, "history": state.get('history', []) + [log_entry]}
-    except Exception as e:
-        return {"score": 0, "feedback": f"Judge Error: {str(e)}"}
+        return {"score": int(score_match.group(1)) if score_match else 0, "feedback": response.text}
+    except:
+        return {"score": 0, "feedback": "Judge Error"}
 
-# --- 5. GRAPH ORCHESTRATION ---
 workflow = StateGraph(AgentState)
 workflow.add_node("generator", universal_generator_node)
 workflow.add_node("judge", judge_node)
@@ -105,60 +93,62 @@ workflow.add_conditional_edges("judge", lambda x: END if x['score'] >= 9000 or x
 app_compiled = workflow.compile()
 
 # --- 6. STREAMLIT UI ---
-st.set_page_config(page_title="Synapse Auditor", layout="wide")
-st.title("🛡️ Synapse-Native: Strict Technical Auditor")
+st.set_page_config(page_title="Synapse-Native Omni", layout="wide")
 
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "online_models" not in st.session_state: st.session_state.online_models = []
 if "test_run_complete" not in st.session_state: st.session_state.test_run_complete = False
 
 with st.sidebar:
-    st.header("⚙️ Configuration")
-    if st.button("🔍 Diagnostic: Test Models"):
-        with st.status("Probing Models...") as status:
+    st.header("⚙️ 1. Model Configuration")
+    
+    if st.button("🔍 Diagnostic: Test Connectivity"):
+        with st.status("Initializing 10s Timeout Probe...") as status:
             online = []
-            for m in FULL_MODEL_LIST:
+            for i, m in enumerate(FULL_MODEL_LIST):
+                status.update(label=f"Testing [{i:02d}] models/{m}...", state="running")
                 try:
-                    llm = ChatGoogleGenerativeAI(model=m, google_api_key=API_KEY, timeout=8, max_retries=0)
+                    llm = ChatGoogleGenerativeAI(model=m, google_api_key=API_KEY, timeout=10, max_retries=0)
                     llm.invoke([HumanMessage(content="Hi")])
                     online.append(m)
-                except: continue
+                    st.write(f"🟢 [{i:02d}] {m} SUCCESS")
+                except:
+                    st.write(f"🔴 [{i:02d}] {m} FAILED")
+                    continue
             st.session_state.online_models = online
             st.session_state.test_run_complete = True
             st.rerun()
 
-    display_list = st.session_state.online_models if st.session_state.test_run_complete else FULL_MODEL_LIST
-    sel_gen = st.selectbox("Primary Auditor", display_list, key="gen_final")
-    sel_judge = st.selectbox("QA Judge", display_list, index=len(display_list)-1, key="judge_final")
+    if st.session_state.test_run_complete:
+        display_list = st.session_state.online_models
+        st.success(f"Verified {len(display_list)} models online.")
+    else:
+        display_list = FULL_MODEL_LIST
+        st.info("Test Optional: All Models Visible")
+
+    test_key = "online_v4" if st.session_state.test_run_complete else "full_v4"
     
+    if display_list:
+        sel_gen = st.selectbox("Chatting/Parsing Model", display_list, index=0, key=f"gen_{test_key}")
+        sel_judge = st.selectbox("Judge/Auditing Model", display_list, index=len(display_list)-1, key=f"judge_{test_key}")
+
     st.divider()
-    uploaded_files = st.file_uploader("Upload Technical Context Assets", accept_multiple_files=True)
+    st.header("📁 2. Upload Context")
+    uploaded_files = st.file_uploader("Upload assets", accept_multiple_files=True)
 
-# --- RENDERING ENGINE (Persistent Logs) ---
+# --- CHAT ---
 for msg in st.session_state.chat_history:
-    with st.chat_message(msg["role"]):
-        if "audit_logs" in msg:
-            for log in msg["audit_logs"]:
-                # Only show logs for valid technical audits (score < 10000)
-                if log['score'] < 10000:
-                    with st.expander(f"⚖️ Analysis Attempt {log['attempt']} | Score: {log['score']}"):
-                        st.markdown(log["critique"])
-        st.markdown(msg["content"])
+    with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
-# --- PROCESSING ENGINE ---
-if query := st.chat_input("Submit technical inquiry..."):
+if query := st.chat_input("Start Technical Audit..."):
     if not uploaded_files:
-        st.error("Protocol Error: Upload technical documentation to proceed.")
+        st.error("Please upload context files.")
     else:
         st.session_state.chat_history.append({"role": "user", "content": query})
         with st.chat_message("user"): st.markdown(query)
 
         with st.chat_message("assistant"):
-            current_logs = []
-            res_placeholder = st.empty()
-            
-            with st.status("🛡️ Validating Query & Context...") as status:
-                # Media handling logic
+            with st.status("🚀 Processing...") as status:
                 handles = []
                 for f in uploaded_files:
                     t_path = f"tmp_{uuid.uuid4()}_{f.name}"
@@ -169,29 +159,15 @@ if query := st.chat_input("Submit technical inquiry..."):
                     os.remove(t_path)
 
                 final_ans = ""
-                # Stream the agentic loop starting at attempt 1
-                for output in app_compiled.stream({
-                    "question": query, "media_handles": handles, "attempts": 1, 
-                    "gen_model": sel_gen, "judge_model": sel_judge, "feedback": "", "history": []
-                }):
+                # Initializing attempt at 1 for clearer logging if needed
+                for output in app_compiled.stream({"question": query, "media_handles": handles, "attempts": 1, "gen_model": sel_gen, "judge_model": sel_judge, "feedback": "", "history": []}):
                     for node, data in output.items():
                         if node == "generator": final_ans = data.get('answer', "")
-                        if node == "judge":
-                            log_entry = {
-                                "attempt": data['history'][-1]['attempt'] if data.get('history') else 1,
-                                "score": data.get('score', 0),
-                                "critique": data.get('feedback', "")
-                            }
-                            current_logs.append(log_entry)
-                status.update(label="✅ Loop Finalized", state="complete")
+                status.update(label="✅ Finished", state="complete")
 
-            # REJECTION OR FINALIZATION
+            # Final check to replace the keyword with a polite rejection in the UI
             if "STRUCTURE_INVALID" in final_ans:
-                final_ans = "🚫 **Protocol Violation:** This query fails structural/persona validation. Please provide a clear, technical request related to the provided documentation."
-            
-            res_placeholder.markdown(final_ans)
-            st.session_state.chat_history.append({
-                "role": "assistant", 
-                "content": final_ans, 
-                "audit_logs": current_logs
-            })
+                final_ans = "This query lacks a proper technical structure or persona. Please rephrase your request as a technical audit objective."
+                
+            st.markdown(final_ans)
+            st.session_state.chat_history.append({"role": "assistant", "content": final_ans})
