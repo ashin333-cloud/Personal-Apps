@@ -1,163 +1,287 @@
 import streamlit as st
+
 import os, re, uuid, time
+
 from typing import List, TypedDict
+
 from google import genai
+
 from langgraph.graph import StateGraph, END
+
 from dotenv import load_dotenv
 
+
+
 # --- 1. INITIALIZATION ---
-# load_dotenv() handles local .env files; st.secrets handles Streamlit Cloud
+
 load_dotenv()
+
 API_KEY = os.getenv("GOOGLE_API_KEY") or st.secrets.get("GOOGLE_API_KEY")
 
+
+
 if not API_KEY:
-    st.error("Missing API Key. Please add GOOGLE_API_KEY to your Streamlit Secrets or .env file.")
+
+    st.error("Missing API Key. Check Streamlit Secrets or .env")
+
     st.stop()
 
-# Initialize the Google GenAI Client
+
+
 client = genai.Client(api_key=API_KEY)
 
-# --- 2. UNIVERSAL STATE DEFINITION ---
+
+
+# --- 2. STATE DEFINITION ---
+
 class AgentState(TypedDict):
+
     question: str
+
     answer: str
+
     media_handles: List[any] 
+
     score: int
+
     attempts: int
+
     history: List[dict]
+
     feedback: str
 
-# --- 3. NODE LOGIC (SYNCHRONOUS FOR STABILITY) ---
+
+
+# --- 3. NODE LOGIC ---
+
+
 
 def universal_generator_node(state: AgentState):
+
+    # Pulling context from the state and the history to ensure continuity
+
     revision = f"\nPREVIOUS FEEDBACK: {state['feedback']}" if state.get('feedback') else ""
+
     
-    # NEW: Stronger instructions to force file analysis
+
     content_parts = [
-        "SYSTEM: You are a Technical Auditor. MANDATORY RULE: You must base your analysis "
-        "directly on the uploaded files. If a 'requirements.txt' or code file is provided, "
-        "audit its contents specifically in relation to the user's query.",
+
+        "SYSTEM: You are a Technical Auditor. MANDATORY: Analyze the provided files strictly. "
+
+        "If a 'requirements.txt' is provided, audit it in detail.",
+
         *state['media_handles'],
+
         f"USER QUERY: {state['question']} {revision}"
+
     ]
 
+
+
     response = client.models.generate_content(
+
         model="gemini-2.5-flash", 
+
         contents=content_parts
+
     )
+
     return {"answer": response.text, "attempts": state['attempts'] + 1}
 
+
+
 def judge_node(state: AgentState):
-    """Evaluates the generator's output and provides a score."""
+
     eval_prompt = (
-        f"Critically audit the following response for technical accuracy. "
-        f"Return a score between 0 and 10000. "
-        f"Format: SCORE: [number] CRITIQUE: [text]\n\n"
-        f"RESPONSE TO AUDIT: {state['answer']}"
+
+        f"Critically audit this response. Return SCORE: [0-10000] and CRITIQUE: [text]. "
+
+        f"RESPONSE: {state['answer']}"
+
     )
+
     
-    # Using Gemini 1.5 Flash for the Judge to save costs/latency
+
     response = client.models.generate_content(
+
         model="gemini-3-flash-preview", 
+
         contents=[*state['media_handles'], eval_prompt]
+
     )
+
     
-    # Extract Score and Feedback using Regex
-    score_match = re.search(r'SCORE:\s*(\d+)', response.text)
-    score = int(score_match.group(1)) if score_match else 0
+
+    score = int(re.search(r'SCORE:\s*(\d+)', response.text).group(1)) if re.search(r'SCORE:\s*(\d+)', response.text) else 0
+
+    critique = re.search(r'CRITIQUE:\s*(.*)', response.text, re.DOTALL).group(1).strip() if "CRITIQUE:" in response.text else "N/A"
+
     
-    critique_match = re.search(r'CRITIQUE:\s*(.*)', response.text, re.DOTALL)
-    critique = critique_match.group(1).strip() if critique_match else "No specific critique provided."
-    
+
     return {
+
         "score": score, 
+
         "feedback": critique,
+
         "history": state.get('history', []) + [{"attempt": state['attempts'], "score": score, "feedback": critique}]
+
     }
 
-# --- 4. LANGGRAPH ORCHESTRATION ---
+
+
+# --- 4. ORCHESTRATION ---
 
 workflow = StateGraph(AgentState)
 
-# Add Nodes
 workflow.add_node("generator", universal_generator_node)
+
 workflow.add_node("judge", judge_node)
 
-# Define Edges
 workflow.set_entry_point("generator")
+
 workflow.add_edge("generator", "judge")
 
-# Conditional Logic: Loop back if score < 8500 and attempts < 3
-def should_continue(state: AgentState):
-    if state['score'] >= 8500 or state['attempts'] >= 3:
-        return END
-    return "generator"
+workflow.add_conditional_edges("judge", lambda x: END if x['score'] >= 9000 or x['attempts'] >= 3 else "generator")
 
-workflow.add_conditional_edges("judge", should_continue)
-
-# Compile the Graph
 app_compiled = workflow.compile()
 
-# --- 5. STREAMLIT PRODUCTION UI ---
 
-st.set_page_config(page_title="Synapse-Native Omni", page_icon="🤖", layout="wide")
 
-st.title("🤖 Synapse-Native: Universal Technical Auditor")
-st.markdown("---")
+# --- 5. STREAMLIT UI WITH SESSION HISTORY ---
 
-# Sidebar for Asset Uploads
+
+
+st.set_page_config(page_title="Synapse-Native Omni", layout="wide")
+
+st.title("🤖 Synapse-Native: Agentic Auditor")
+
+
+
+# Feature 1: Store Previous Chat History
+
+if "chat_history" not in st.session_state:
+
+    st.session_state.chat_history = [] # Format: {"role": "user/assistant", "content": "text"}
+
+
+
+# Sidebar for Assets
+
 with st.sidebar:
-    st.header("1. Upload Context")
-    uploaded_files = st.file_uploader(
-        "Upload files (PDF, Images, Audio, Video)", 
-        accept_multiple_files=True
-    )
-    st.info("Files are processed securely via Gemini File API.")
 
-# Main Chat Interface
-if query := st.chat_input("What would you like me to audit?"):
+    st.header("1. Upload Assets")
+
+    uploaded_files = st.file_uploader("Upload context files", accept_multiple_files=True)
+
+    if st.button("Clear Chat History"):
+
+        st.session_state.chat_history = []
+
+        st.rerun()
+
+
+
+# Display existing chat history
+
+for message in st.session_state.chat_history:
+
+    with st.chat_message(message["role"]):
+
+        st.markdown(message["content"])
+
+
+
+# Main Input
+
+if query := st.chat_input("Analyze these files..."):
+
+    # Add user message to history
+
+    st.session_state.chat_history.append({"role": "user", "content": query})
+
+    with st.chat_message("user"):
+
+        st.markdown(query)
+
+
+
     if not uploaded_files:
-        st.warning("⚠️ Please upload at least one asset in the sidebar to provide context for the audit.")
+
+        st.error("Please upload assets in the sidebar.")
+
     else:
-        with st.status("🚀 Initializing Agentic Audit Loop...") as status:
-            # Step A: Handle Gemini File Uploads
-            handles = []
-            for f in uploaded_files:
-                temp_file = f"temp_{uuid.uuid4()}_{f.name}"
-                with open(temp_file, "wb") as buffer:
-                    buffer.write(f.getvalue())
-                
-                # Upload to Gemini
-                h = client.files.upload(file=temp_file)
-                while h.state.name == "PROCESSING":
-                    time.sleep(2)
-                    h = client.files.get(name=h.name)
-                
-                handles.append(h)
-                os.remove(temp_file) # Clean up local storage
 
-            # Step B: Execute LangGraph (Synchronous Invoke)
-            status.update(label="🧠 Analyzing and Judging (Multi-step loop)...")
-            
-            initial_state = {
-                "question": query, 
-                "media_handles": handles, 
-                "attempts": 0, 
-                "history": [], 
-                "score": 0, 
-                "feedback": ""
-            }
-            
-            final_output = app_compiled.invoke(initial_state)
-            
-            status.update(label=f"✅ Audit Complete! Final Score: {final_output['score']}/10000", state="complete")
+        with st.chat_message("assistant"):
 
-            # Step C: Display Results
-            st.subheader("Final Technical Audit")
-            st.markdown(final_output['answer'])
+            with st.status("🚀 Agentic Audit in Progress...") as status:
+
+                # Step A: File Processing
+
+                handles = []
+
+                for f in uploaded_files:
+
+                    t_file = f"temp_{uuid.uuid4()}_{f.name}"
+
+                    with open(t_file, "wb") as b: b.write(f.getvalue())
+
+                    h = client.files.upload(file=t_file)
+
+                    while h.state.name == "PROCESSING":
+
+                        time.sleep(1)
+
+                        h = client.files.get(name=h.name)
+
+                    handles.append(h)
+
+                    os.remove(t_file)
+
+
+
+                # Feature 2: Visible Execution Steps via LangGraph Streaming
+
+                initial_state = {
+
+                    "question": query, "media_handles": handles, "attempts": 0, 
+
+                    "history": [], "score": 0, "feedback": ""
+
+                }
+
+
+
+                final_ans = ""
+
+                # We use .stream() to catch each node's output as it happens
+
+                for output in app_compiled.stream(initial_state):
+
+                    for node_name, data in output.items():
+
+                        if node_name == "generator":
+
+                            st.write("📝 **Generator:** Drafted a technical analysis.")
+
+                            final_ans = data['answer']
+
+                        elif node_name == "judge":
+
+                            st.write(f"⚖️ **Judge:** Scored response **{data['score']}/10000**")
+
+                            if data['score'] < 9000:
+
+                                st.write(f"🔄 *Re-routing for improvement:* {data['feedback'][:100]}...")
+
+
+
+                status.update(label="✅ Audit Finalized", state="complete")
+
             
-            with st.expander("View Agent Reasoning & Iteration Logs"):
-                for entry in final_output['history']:
-                    st.write(f"**Attempt {entry['attempt']}** | **Score:** {entry['score']}")
-                    st.write(f"*Feedback:* {entry['feedback']}")
-                    st.divider()
+
+            # Display Final Result
+
+            st.markdown(final_ans)
+
+            st.session_state.chat_history.append({"role": "assistant", "content": final_ans})
