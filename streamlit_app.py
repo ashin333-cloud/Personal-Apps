@@ -28,10 +28,17 @@ class AgentState(TypedDict):
     judge_model: str # User-selected
 
 # --- 3. MODEL LIST (VERIFIED 2026) ---
-MODELS_TO_TEST = [
-    "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", 
-    "gemini-2.5-flash-lite", "gemma-3-27b-it", "gemini-3-flash-preview", 
-    "gemini-flash-latest", "gemini-pro-latest"
+FULL_MODEL_LIST = [
+    "gemini-2.0-flash", "gemini-2.0-flash-001", "gemini-2.0-flash-lite",
+    "gemini-2.0-flash-lite-001", "gemini-2.0-flash-exp-image-generation",
+    "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite",
+    "gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts",
+    "gemini-2.5-flash-image", "gemini-2.5-flash-lite-preview-09-2025",
+    "gemini-3-flash-preview", "gemini-3-pro-preview", "gemini-3.1-pro-preview",
+    "gemini-3.1-pro-preview-customtools", "gemini-3.1-flash-lite-preview",
+    "gemma-3-1b-it", "gemma-3-4b-it", "gemma-3-12b-it", "gemma-3-27b-it",
+    "gemma-3n-e2b-it", "gemma-3n-e4b-it", "gemini-flash-latest",
+    "gemini-pro-latest"
 ]
 
 # --- 4. NODE LOGIC ---
@@ -92,7 +99,7 @@ with st.sidebar:
     if st.button("🔍 Check Model Connectivity"):
         with st.status("Probing Google Cloud API...") as status:
             online = []
-            for m in MODELS_TO_TEST:
+            for m in FULL_MODEL_LIST:
                 try:
                     client.models.generate_content(model=m, contents="hi", config={'max_output_tokens': 1})
                     online.append(m)
