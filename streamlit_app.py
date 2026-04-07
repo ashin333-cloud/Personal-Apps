@@ -73,9 +73,11 @@ def judge_node(state: AgentState):
         )
         score_match = re.search(r'SCORE:\s*(\d+)', response.text)
         score = int(score_match.group(1)) if score_match else 0
+        # Preserve the current attempt number for history
+        current_attempt = state['attempts']
         return {
             "score": score, "feedback": response.text,
-            "history": state.get('history', []) + [{"attempt": state['attempts'], "score": score, "critique": response.text}]
+            "history": state.get('history', []) + [{"attempt": current_attempt, "score": score, "critique": response.text}]
         }
     except Exception as e:
         return {"score": 0, "feedback": f"Judge Error: {str(e)}"}
@@ -99,9 +101,12 @@ if "test_run_complete" not in st.session_state: st.session_state.test_run_comple
 with st.sidebar:
     st.header("⚙️ 1. Model Configuration")
     if st.button("🔍 Diagnostic: Test Connectivity"):
-        with st.status("Testing Models...") as status:
+        with st.status("Initializing Diagnostics...") as status:
             online = []
+            total = len(FULL_MODEL_LIST)
             for i, m in enumerate(FULL_MODEL_LIST):
+                # Update status with current model name and number
+                status.update(label=f"[{i+1}/{total}] Testing {m}...", state="running")
                 try:
                     llm = ChatGoogleGenerativeAI(model=m, google_api_key=API_KEY, timeout=10, max_retries=0)
                     llm.invoke([HumanMessage(content="Hi")])
@@ -126,7 +131,6 @@ with st.sidebar:
 # --- RENDERING ENGINE ---
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
-        # Check if there are preserved logs for this specific message
         if "audit_logs" in msg:
             for log in msg["audit_logs"]:
                 with st.expander(f"⚖️ Audit Attempt {log['attempt']} | Score: {log['score']}/10000"):
@@ -142,7 +146,7 @@ if query := st.chat_input("Start Technical Audit..."):
         with st.chat_message("user"): st.markdown(query)
 
         with st.chat_message("assistant"):
-            current_audit_logs = [] # Temp storage for this specific run
+            current_audit_logs = [] 
             response_placeholder = st.empty()
             
             with st.status("🚀 Agentic Loop Processing...") as status:
@@ -156,33 +160,31 @@ if query := st.chat_input("Start Technical Audit..."):
                     os.remove(t_path)
 
                 final_ans = ""
+                # Start attempts at 1 so the sequence is 1, 2, 3
                 for output in app_compiled.stream({
-                    "question": query, "media_handles": handles, "attempts": 0, 
+                    "question": query, "media_handles": handles, "attempts": 1, 
                     "gen_model": sel_gen, "judge_model": sel_judge, "feedback": "", "history": []
                 }):
                     for node, data in output.items():
                         if node == "generator":
                             final_ans = data.get('answer', "")
-                            st.write(f"📝 Attempt {data.get('attempts')} generated.")
+                            # data['attempts'] was incremented in the node, so we subtract 1 to show current
+                            st.write(f"📝 Attempt {data.get('attempts') - 1} generated.")
                         if node == "judge":
-                            # Store the log for persistence
                             log_entry = {
-                                "attempt": data.get('attempts', 0),
+                                "attempt": data.get('history')[-1]['attempt'] if data.get('history') else 0,
                                 "score": data.get('score', 0),
                                 "critique": data.get('feedback', "")
                             }
                             current_audit_logs.append(log_entry)
-                            
-                            # Immediate UI feedback
                             st.write(f"⚖️ **Score: {log_entry['score']}/10000**")
                 
                 status.update(label="✅ Audit Finalized", state="complete")
             
             response_placeholder.markdown(final_ans)
             
-            # Save the final answer AND the collected logs to session state
             st.session_state.chat_history.append({
                 "role": "assistant", 
                 "content": final_ans,
-                "audit_logs": current_audit_logs # THIS PRESERVES THE JUDGE DATA
+                "audit_logs": current_audit_logs 
             })
