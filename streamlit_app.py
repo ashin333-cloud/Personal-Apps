@@ -104,7 +104,7 @@ def judge_node(state: AgentState):
 
     response = client.models.generate_content(
 
-        model="gemini-flash-latest", 
+        model="gemma-3n-e4b-it", 
 
         contents=[*state['media_handles'], eval_prompt]
 
