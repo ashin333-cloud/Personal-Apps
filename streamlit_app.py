@@ -5,13 +5,15 @@ from google import genai
 from google.genai import types 
 from langgraph.graph import StateGraph, END
 from dotenv import load_dotenv
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage
 
 # --- 1. INITIALIZATION ---
 load_dotenv()
 API_KEY = os.getenv("GOOGLE_API_KEY") or st.secrets.get("GOOGLE_API_KEY")
 
 if not API_KEY:
-    st.error("Missing API Key.")
+    st.error("Missing API Key. Check .env or Streamlit Secrets.")
     st.stop()
 
 client = genai.Client(api_key=API_KEY)
@@ -28,7 +30,7 @@ class AgentState(TypedDict):
     gen_model: str 
     judge_model: str 
 
-# --- 3. THE COMPLETE MODEL LIST ---
+# --- 3. VERIFIED 2026 MODEL LIST ---
 FULL_MODEL_LIST = [
     "gemini-2.0-flash", "gemini-2.0-flash-001", "gemini-2.0-flash-lite",
     "gemini-2.0-flash-lite-001", "gemini-2.0-flash-exp-image-generation",
@@ -111,44 +113,50 @@ with st.sidebar:
     st.header("⚙️ 1. Model Configuration")
     
     if st.button("🔍 Diagnostic: Test Connectivity"):
-        with st.status("Initializing Probe...") as status:
+        with st.status("Initializing 10s Timeout Probe...") as status:
             online = []
             for i, m in enumerate(FULL_MODEL_LIST):
                 status.update(label=f"Testing [{i:02d}] {m}...", state="running")
                 try:
-                    client.models.generate_content(model=m, contents="hi", config={'max_output_tokens': 1})
+                    # Using the exact logic from your original code
+                    llm = ChatGoogleGenerativeAI(
+                        model=m,
+                        google_api_key=API_KEY,
+                        timeout=10, # 10 second timeout per model
+                        max_retries=0
+                    )
+                    llm.invoke([HumanMessage(content="Hi")])
                     online.append(m)
                     st.write(f"🟢 [{i:02d}] {m} SUCCESS")
                 except:
-                    st.write(f"🔴 [{i:02d}] {m} FAILED")
+                    st.write(f"🔴 [{i:02d}] {m} FAILED/TIMEOUT")
                     continue
+            
             st.session_state.online_models = online
             st.session_state.test_run_complete = True
             status.update(label=f"Done! {len(online)} Models Online", state="complete")
-            st.rerun() # Force rerun to refresh selectboxes
+            st.rerun()
 
-    # Determine which list to use and the dynamic key
+    # REACTION LOGIC: Filtering both lists
     if st.session_state.test_run_complete and st.session_state.online_models:
         display_list = st.session_state.online_models
-        list_key = "online_version"
-        st.success(f"Verified: {len(display_list)} Models")
+        st.success(f"Verified {len(display_list)} models online.")
     else:
         display_list = FULL_MODEL_LIST
-        list_key = "full_version"
-        st.info("Test Optional: All Models Visible")
+        st.info("Showing all models (Test Optional)")
 
-    # Use unique keys for selectboxes to force refresh when list_key changes
-    sel_gen = st.selectbox("Chatting/Parsing Model", display_list, index=0, key=f"gen_{list_key}")
+    # FIX: Using distinct keys and dynamic index to ensure visibility in both dropdowns
+    sel_gen = st.selectbox("Chatting/Parsing Model", display_list, index=0, key="gen_select")
     
-    # Ensuring the Judge index is safe for the current list length
-    judge_idx = min(len(display_list)-1, 20) if not st.session_state.test_run_complete else len(display_list)-1
-    sel_judge = st.selectbox("Judge/Auditing Model", display_list, index=judge_idx, key=f"judge_{list_key}")
+    # Selection logic for Judge: Default to last item, safely within bounds
+    default_judge_idx = len(display_list) - 1
+    sel_judge = st.selectbox("Judge/Auditing Model", display_list, index=default_judge_idx, key="judge_select")
 
     st.divider()
     st.header("📁 2. Upload Context")
     uploaded_files = st.file_uploader("Upload assets", accept_multiple_files=True)
 
-# --- CHAT INTERFACE ---
+# --- MAIN CHAT ---
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
@@ -160,7 +168,7 @@ if query := st.chat_input("Start Technical Audit..."):
         with st.chat_message("user"): st.markdown(query)
 
         with st.chat_message("assistant"):
-            with st.status(f"🚀 Audit: {sel_gen} + {sel_judge}") as status:
+            with st.status(f"🚀 Audit: {sel_gen} vs {sel_judge}") as status:
                 handles = []
                 for f in uploaded_files:
                     t_path = f"tmp_{uuid.uuid4()}_{f.name}"
