@@ -53,17 +53,18 @@ safety_config = [
 
 # --- 4. NODE LOGIC ---
 def universal_generator_node(state: AgentState):
-    # FIXED: Added strict system instructions for persona and structural validation
+    # ADJUSTED: Allows for asset-based analysis while still blocking generic chat
     guard_instructions = (
-        "SYSTEM: You are a Technical Auditor. Your protocol is strictly limited to auditing technical documents.\n"
-        "1. If the user query is a general knowledge question (e.g., 'What is a whale?'), "
-        "is too short, or lacks a formal technical structure/persona, respond ONLY with: 'STRUCTURE_INVALID'.\n"
-        "2. Do NOT answer general questions. Do NOT answer if the query is incomplete.\n"
-        "3. If the query is a valid technical audit request, proceed with the audit."
+        "SYSTEM: You are a Senior Technical Auditor.\n"
+        "PROTOCOL:\n"
+        "1. If the user asks about the uploaded assets (images, code, docs), this is VALID. Proceed with a technical analysis.\n"
+        "2. If the user asks a general knowledge question unrelated to the assets (e.g., 'who is the president'), respond ONLY with: 'STRUCTURE_INVALID'.\n"
+        "3. If the query is just a greeting or a single word without context, respond ONLY with: 'STRUCTURE_INVALID'.\n"
+        "4. Always maintain a professional, analytical persona."
     )
     
     revision = f"\nPREVIOUS FEEDBACK: {state['feedback']}" if state.get('feedback') else ""
-    content_parts = [guard_instructions, *state['media_handles'], f"QUERY: {state['question']} {revision}"]
+    content_parts = [guard_instructions, *state['media_handles'], f"USER QUERY: {state['question']} {revision}"]
     try:
         response = client.models.generate_content(
             model=state['gen_model'], contents=content_parts,
