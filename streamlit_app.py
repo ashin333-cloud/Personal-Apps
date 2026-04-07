@@ -44,11 +44,12 @@ FULL_MODEL_LIST = [
     "gemini-pro-latest"
 ]
 
+# FIX: Updated Safety Settings with correct HarmCategory strings
 safety_config = [
-    types.SafetySetting(category="HATE_SPEECH", threshold="BLOCK_NONE"),
-    types.SafetySetting(category="HARASSMENT", threshold="BLOCK_NONE"),
-    types.SafetySetting(category="SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-    types.SafetySetting(category="DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
 ]
 
 # --- 4. NODE LOGIC ---
@@ -99,72 +100,47 @@ with st.sidebar:
             for i, m in enumerate(FULL_MODEL_LIST):
                 status.update(label=f"Testing [{i:02d}] models/{m}...", state="running")
                 try:
-                    # EXACT REPLICATION OF YOUR COLAB LOGIC
-                    llm = ChatGoogleGenerativeAI(
-                        model=m, 
-                        google_api_key=API_KEY, 
-                        timeout=10, 
-                        max_retries=0
-                    )
+                    llm = ChatGoogleGenerativeAI(model=m, google_api_key=API_KEY, timeout=10, max_retries=0)
                     llm.invoke([HumanMessage(content="Hi")])
                     online.append(m)
                     st.write(f"🟢 [{i:02d}] {m} SUCCESS")
-                except Exception as e:
+                except:
                     st.write(f"🔴 [{i:02d}] {m} FAILED")
                     continue
-            
             st.session_state.online_models = online
             st.session_state.test_run_complete = True
             st.rerun()
 
-    # --- DYNAMIC LIST HANDLING ---
-    # We prioritize the online_models list if it exists
     if st.session_state.test_run_complete:
         display_list = st.session_state.online_models
         st.success(f"Verified {len(display_list)} models online.")
     else:
         display_list = FULL_MODEL_LIST
-        st.info("Showing all models (Test Optional)")
+        st.info("Test Optional: All Models Visible")
 
-    # The Key Switch forces Streamlit to rebuild the dropdowns with the NEW list
-    test_key = "online_v3" if st.session_state.test_run_complete else "full_v3"
+    test_key = "online_v4" if st.session_state.test_run_complete else "full_v4"
     
-    if not display_list:
-        st.error("Diagnostic found 0 models. Check API Key.")
-    else:
-        # CHATTING MODEL
-        sel_gen = st.selectbox(
-            "Chatting/Parsing Model", 
-            display_list, 
-            index=0, 
-            key=f"gen_{test_key}"
-        )
-        
-        # JUDGE MODEL - Now explicitly defaults to last item to ensure visibility of all models
-        sel_judge = st.selectbox(
-            "Judge/Auditing Model", 
-            display_list, 
-            index=len(display_list) - 1, 
-            key=f"judge_{test_key}"
-        )
+    if display_list:
+        sel_gen = st.selectbox("Chatting/Parsing Model", display_list, index=0, key=f"gen_{test_key}")
+        sel_judge = st.selectbox("Judge/Auditing Model", display_list, index=len(display_list)-1, key=f"judge_{test_key}")
 
     st.divider()
     st.header("📁 2. Upload Context")
     uploaded_files = st.file_uploader("Upload assets", accept_multiple_files=True)
 
-# --- CHAT INTERFACE ---
+# --- CHAT ---
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
 if query := st.chat_input("Start Technical Audit..."):
-    if not (sel_gen and sel_judge):
-        st.error("Models not selected.")
+    if not uploaded_files:
+        st.error("Please upload context files.")
     else:
         st.session_state.chat_history.append({"role": "user", "content": query})
         with st.chat_message("user"): st.markdown(query)
 
         with st.chat_message("assistant"):
-            with st.status(f"🚀 Audit: {sel_gen} + {sel_judge}") as status:
+            with st.status("🚀 Processing...") as status:
                 handles = []
                 for f in uploaded_files:
                     t_path = f"tmp_{uuid.uuid4()}_{f.name}"
@@ -175,7 +151,8 @@ if query := st.chat_input("Start Technical Audit..."):
                     os.remove(t_path)
 
                 final_ans = ""
-                for output in app_compiled.stream({"question": query, "media_handles": handles, "attempts": 0, "gen_model": sel_gen, "judge_model": sel_judge}):
+                # Fixed: Corrected state passing for app_compiled
+                for output in app_compiled.stream({"question": query, "media_handles": handles, "attempts": 0, "gen_model": sel_gen, "judge_model": sel_judge, "feedback": "", "history": []}):
                     for node, data in output.items():
                         if node == "generator": final_ans = data.get('answer', "")
                 status.update(label="✅ Finished", state="complete")
