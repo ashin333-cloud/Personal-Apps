@@ -53,8 +53,17 @@ safety_config = [
 
 # --- 4. NODE LOGIC ---
 def universal_generator_node(state: AgentState):
+    # FIXED: Added strict system instructions for persona and structural validation
+    guard_instructions = (
+        "SYSTEM: You are a Technical Auditor. Your protocol is strictly limited to auditing technical documents.\n"
+        "1. If the user query is a general knowledge question (e.g., 'What is a whale?'), "
+        "is too short, or lacks a formal technical structure/persona, respond ONLY with: 'STRUCTURE_INVALID'.\n"
+        "2. Do NOT answer general questions. Do NOT answer if the query is incomplete.\n"
+        "3. If the query is a valid technical audit request, proceed with the audit."
+    )
+    
     revision = f"\nPREVIOUS FEEDBACK: {state['feedback']}" if state.get('feedback') else ""
-    content_parts = ["SYSTEM: Technical Auditor.", *state['media_handles'], f"{state['question']} {revision}"]
+    content_parts = [guard_instructions, *state['media_handles'], f"QUERY: {state['question']} {revision}"]
     try:
         response = client.models.generate_content(
             model=state['gen_model'], contents=content_parts,
@@ -65,6 +74,10 @@ def universal_generator_node(state: AgentState):
         return {"answer": f"⚠️ Error: {str(e)}", "attempts": state['attempts'] + 1}
 
 def judge_node(state: AgentState):
+    # FIXED: Short-circuit if the generator flagged a structural/persona issue
+    if "STRUCTURE_INVALID" in state['answer']:
+        return {"score": 10000, "feedback": "Query rejected: Incomplete or non-technical structure."}
+
     eval_prompt = f"SCORE: [0-10000] CRITIQUE: [text]\n\nRESPONSE: {state['answer']}"
     try:
         response = client.models.generate_content(
@@ -73,7 +86,6 @@ def judge_node(state: AgentState):
         )
         score_match = re.search(r'SCORE:\s*(\d+)', response.text)
         score = int(score_match.group(1)) if score_match else 0
-        # Preserve the current attempt number for history
         current_attempt = state['attempts']
         return {
             "score": score, "feedback": response.text,
@@ -105,7 +117,6 @@ with st.sidebar:
             online = []
             total = len(FULL_MODEL_LIST)
             for i, m in enumerate(FULL_MODEL_LIST):
-                # Update status with current model name and number
                 status.update(label=f"[{i+1}/{total}] Testing {m}...", state="running")
                 try:
                     llm = ChatGoogleGenerativeAI(model=m, google_api_key=API_KEY, timeout=10, max_retries=0)
@@ -160,7 +171,6 @@ if query := st.chat_input("Start Technical Audit..."):
                     os.remove(t_path)
 
                 final_ans = ""
-                # Start attempts at 1 so the sequence is 1, 2, 3
                 for output in app_compiled.stream({
                     "question": query, "media_handles": handles, "attempts": 1, 
                     "gen_model": sel_gen, "judge_model": sel_judge, "feedback": "", "history": []
@@ -168,7 +178,6 @@ if query := st.chat_input("Start Technical Audit..."):
                     for node, data in output.items():
                         if node == "generator":
                             final_ans = data.get('answer', "")
-                            # data['attempts'] was incremented in the node, so we subtract 1 to show current
                             st.write(f"📝 Attempt {data.get('attempts') - 1} generated.")
                         if node == "judge":
                             log_entry = {
@@ -180,6 +189,10 @@ if query := st.chat_input("Start Technical Audit..."):
                             st.write(f"⚖️ **Score: {log_entry['score']}/10000**")
                 
                 status.update(label="✅ Audit Finalized", state="complete")
+            
+            # FIXED: Handle the rejection keyword in the final output
+            if "STRUCTURE_INVALID" in final_ans:
+                final_ans = "🚫 **Audit Rejected:** Your query lacks a professional technical structure, is incomplete, or is an unrelated general knowledge question. Please submit a structured technical inquiry."
             
             response_placeholder.markdown(final_ans)
             
