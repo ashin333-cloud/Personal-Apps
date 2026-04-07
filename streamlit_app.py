@@ -80,7 +80,7 @@ def universal_generator_node(state: AgentState):
 
     response = client.models.generate_content(
 
-        model="gemini-2.5-flash", 
+        model="gemini-2.5-flash-lite", 
 
         contents=content_parts
 
