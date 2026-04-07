@@ -11,7 +11,7 @@ load_dotenv()
 API_KEY = os.getenv("GOOGLE_API_KEY") or st.secrets.get("GOOGLE_API_KEY")
 
 if not API_KEY:
-    st.error("Missing API Key. Please check your .env or Streamlit Secrets.")
+    st.error("Missing API Key.")
     st.stop()
 
 client = genai.Client(api_key=API_KEY)
@@ -42,7 +42,6 @@ FULL_MODEL_LIST = [
     "gemini-pro-latest"
 ]
 
-# Safety config to prevent "ClientError" blocks on technical/modding queries
 safety_config = [
     types.SafetySetting(category="HATE_SPEECH", threshold="BLOCK_NONE"),
     types.SafetySetting(category="HARASSMENT", threshold="BLOCK_NONE"),
@@ -55,11 +54,10 @@ safety_config = [
 def universal_generator_node(state: AgentState):
     revision = f"\nPREVIOUS FEEDBACK: {state['feedback']}" if state.get('feedback') else ""
     content_parts = [
-        "SYSTEM: You are a Technical Auditor. Analyze the files strictly and answer the query.",
+        "SYSTEM: You are a Technical Auditor. Analyze the files strictly.",
         *state['media_handles'],
         f"USER QUERY: {state['question']} {revision}"
     ]
-    
     try:
         response = client.models.generate_content(
             model=state['gen_model'], 
@@ -76,23 +74,17 @@ def judge_node(state: AgentState):
         f"USER QUERY: {state['question']}\n"
         f"RESPONSE TO AUDIT: {state['answer']}"
     )
-    
     try:
-        # Judge only audits text to avoid multimodal safety triggers
         response = client.models.generate_content(
             model=state['judge_model'], 
             contents=[eval_prompt],
             config=types.GenerateContentConfig(safety_settings=safety_config)
         )
-        
-        res_text = response.text
-        score_match = re.search(r'SCORE:\s*(\d+)', res_text)
+        score_match = re.search(r'SCORE:\s*(\d+)', response.text)
         score = int(score_match.group(1)) if score_match else 0
-        critique = re.search(r'CRITIQUE:\s*(.*)', res_text, re.DOTALL).group(1).strip() if "CRITIQUE:" in res_text else "N/A"
-        
+        critique = re.search(r'CRITIQUE:\s*(.*)', response.text, re.DOTALL).group(1).strip() if "CRITIQUE:" in response.text else "N/A"
         return {
-            "score": score, 
-            "feedback": critique,
+            "score": score, "feedback": critique,
             "history": state.get('history', []) + [{"attempt": state['attempts'], "score": score, "feedback": critique}]
         }
     except Exception as e:
@@ -118,12 +110,10 @@ if "test_run_complete" not in st.session_state: st.session_state.test_run_comple
 with st.sidebar:
     st.header("⚙️ 1. Model Configuration")
     
-    # Optional Diagnostic Button
     if st.button("🔍 Diagnostic: Test Connectivity"):
         with st.status("Initializing Probe...") as status:
             online = []
             for i, m in enumerate(FULL_MODEL_LIST):
-                # Live status update showing number and name
                 status.update(label=f"Testing [{i:02d}] {m}...", state="running")
                 try:
                     client.models.generate_content(model=m, contents="hi", config={'max_output_tokens': 1})
@@ -135,46 +125,42 @@ with st.sidebar:
             st.session_state.online_models = online
             st.session_state.test_run_complete = True
             status.update(label=f"Done! {len(online)} Models Online", state="complete")
+            st.rerun() # Force rerun to refresh selectboxes
 
-    # --- DYNAMIC MODEL SELECTION ---
-    # Switch to online list only if test was run
-    if st.session_state.test_run_complete:
+    # Determine which list to use and the dynamic key
+    if st.session_state.test_run_complete and st.session_state.online_models:
         display_list = st.session_state.online_models
-        st.success(f"Verified Models: {len(display_list)}")
+        list_key = "online_version"
+        st.success(f"Verified: {len(display_list)} Models")
     else:
         display_list = FULL_MODEL_LIST
-        st.info("Showing All Models (Test Optional)")
+        list_key = "full_version"
+        st.info("Test Optional: All Models Visible")
 
-    if not display_list:
-        st.error("No models available. Check API key.")
-        sel_gen, sel_judge = None, None
-    else:
-        sel_gen = st.selectbox("Chatting/Parsing Model", display_list, index=0)
-        sel_judge = st.selectbox("Judge/Auditing Model", display_list, index=len(display_list)-1)
+    # Use unique keys for selectboxes to force refresh when list_key changes
+    sel_gen = st.selectbox("Chatting/Parsing Model", display_list, index=0, key=f"gen_{list_key}")
+    
+    # Ensuring the Judge index is safe for the current list length
+    judge_idx = min(len(display_list)-1, 20) if not st.session_state.test_run_complete else len(display_list)-1
+    sel_judge = st.selectbox("Judge/Auditing Model", display_list, index=judge_idx, key=f"judge_{list_key}")
 
     st.divider()
     st.header("📁 2. Upload Context")
     uploaded_files = st.file_uploader("Upload assets", accept_multiple_files=True)
-    if st.button("Clear History"):
-        st.session_state.chat_history = []
-        st.rerun()
 
-# --- MAIN CHAT INTERFACE ---
+# --- CHAT INTERFACE ---
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
 if query := st.chat_input("Start Technical Audit..."):
-    if not (sel_gen and sel_judge):
-        st.error("Please select models first.")
-    elif not uploaded_files:
-        st.error("Please upload context files.")
+    if not uploaded_files:
+        st.error("Please upload assets for context.")
     else:
         st.session_state.chat_history.append({"role": "user", "content": query})
         with st.chat_message("user"): st.markdown(query)
 
         with st.chat_message("assistant"):
             with st.status(f"🚀 Audit: {sel_gen} + {sel_judge}") as status:
-                # File Handling
                 handles = []
                 for f in uploaded_files:
                     t_path = f"tmp_{uuid.uuid4()}_{f.name}"
