@@ -97,37 +97,56 @@ with st.sidebar:
         with st.status("Initializing 10s Timeout Probe...") as status:
             online = []
             for i, m in enumerate(FULL_MODEL_LIST):
-                status.update(label=f"Testing [{i:02d}] {m}...", state="running")
+                status.update(label=f"Testing [{i:02d}] models/{m}...", state="running")
                 try:
-                    llm = ChatGoogleGenerativeAI(model=m, google_api_key=API_KEY, timeout=10, max_retries=0)
+                    # EXACT REPLICATION OF YOUR COLAB LOGIC
+                    llm = ChatGoogleGenerativeAI(
+                        model=m, 
+                        google_api_key=API_KEY, 
+                        timeout=10, 
+                        max_retries=0
+                    )
                     llm.invoke([HumanMessage(content="Hi")])
                     online.append(m)
                     st.write(f"🟢 [{i:02d}] {m} SUCCESS")
-                except:
+                except Exception as e:
                     st.write(f"🔴 [{i:02d}] {m} FAILED")
+                    continue
+            
             st.session_state.online_models = online
             st.session_state.test_run_complete = True
             st.rerun()
 
-    # --- DYNAMIC FILTERING ---
+    # --- DYNAMIC LIST HANDLING ---
+    # We prioritize the online_models list if it exists
     if st.session_state.test_run_complete:
         display_list = st.session_state.online_models
         st.success(f"Verified {len(display_list)} models online.")
     else:
         display_list = FULL_MODEL_LIST
-        st.info("Test Optional: All Models Visible")
+        st.info("Showing all models (Test Optional)")
 
+    # The Key Switch forces Streamlit to rebuild the dropdowns with the NEW list
+    test_key = "online_v3" if st.session_state.test_run_complete else "full_v3"
+    
     if not display_list:
-        st.error("No models responded. Check API Key.")
+        st.error("Diagnostic found 0 models. Check API Key.")
     else:
-        # We use a key that changes after the test to force a fresh render
-        test_key = "online" if st.session_state.test_run_complete else "full"
+        # CHATTING MODEL
+        sel_gen = st.selectbox(
+            "Chatting/Parsing Model", 
+            display_list, 
+            index=0, 
+            key=f"gen_{test_key}"
+        )
         
-        sel_gen = st.selectbox("Chatting/Parsing Model", display_list, index=0, key=f"gen_{test_key}")
-        
-        # Ensure judge doesn't default to a broken index
-        judge_default = len(display_list) - 1
-        sel_judge = st.selectbox("Judge/Auditing Model", display_list, index=judge_idx if (judge_idx := judge_default) >= 0 else 0, key=f"judge_{test_key}")
+        # JUDGE MODEL - Now explicitly defaults to last item to ensure visibility of all models
+        sel_judge = st.selectbox(
+            "Judge/Auditing Model", 
+            display_list, 
+            index=len(display_list) - 1, 
+            key=f"judge_{test_key}"
+        )
 
     st.divider()
     st.header("📁 2. Upload Context")
@@ -139,7 +158,7 @@ for msg in st.session_state.chat_history:
 
 if query := st.chat_input("Start Technical Audit..."):
     if not (sel_gen and sel_judge):
-        st.error("Models not ready.")
+        st.error("Models not selected.")
     else:
         st.session_state.chat_history.append({"role": "user", "content": query})
         with st.chat_message("user"): st.markdown(query)
