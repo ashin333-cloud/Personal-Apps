@@ -24,8 +24,8 @@ class AgentState(TypedDict):
     attempts: int
     history: List[dict]
     feedback: str
-    gen_model: str # User-selected
-    judge_model: str # User-selected
+    gen_model: str 
+    judge_model: str 
 
 # --- 3. MODEL LIST (VERIFIED 2026) ---
 FULL_MODEL_LIST = [
@@ -51,30 +51,41 @@ def universal_generator_node(state: AgentState):
         f"USER QUERY: {state['question']} {revision}"
     ]
     
-    # Dynamically uses the selected Generator model
-    response = client.models.generate_content(
-        model=state['gen_model'], 
-        contents=content_parts
-    )
-    return {"answer": response.text, "attempts": state['attempts'] + 1}
+    try:
+        response = client.models.generate_content(
+            model=state['gen_model'], 
+            contents=content_parts
+        )
+        return {"answer": response.text, "attempts": state['attempts'] + 1}
+    except Exception as e:
+        return {"answer": f"⚠️ Generator Error: {str(e)}", "attempts": state['attempts'] + 1}
 
 def judge_node(state: AgentState):
-    eval_prompt = f"Return SCORE: [0-10000] and CRITIQUE: [text]. Audit: {state['answer']}"
-    
-    # Dynamically uses the selected Judge model
-    response = client.models.generate_content(
-        model=state['judge_model'], 
-        contents=[*state['media_handles'], eval_prompt]
+    # CRITICAL FIX: The Judge only reviews the text to avoid Multimodal Safety triggers
+    eval_prompt = (
+        f"Critically audit this response. Return SCORE: [0-10000] and CRITIQUE: [text].\n\n"
+        f"USER QUERY: {state['question']}\n"
+        f"RESPONSE TO AUDIT: {state['answer']}"
     )
     
-    score_match = re.search(r'SCORE:\s*(\d+)', response.text)
-    score = int(score_match.group(1)) if score_match else 0
-    critique = re.search(r'CRITIQUE:\s*(.*)', response.text, re.DOTALL).group(1).strip() if "CRITIQUE:" in response.text else "N/A"
-    
-    return {
-        "score": score, "feedback": critique,
-        "history": state.get('history', []) + [{"attempt": state['attempts'], "score": score, "feedback": critique}]
-    }
+    try:
+        response = client.models.generate_content(
+            model=state['judge_model'], 
+            contents=[eval_prompt] # Media handles removed here for stability
+        )
+        
+        res_text = response.text
+        score_match = re.search(r'SCORE:\s*(\d+)', res_text)
+        score = int(score_match.group(1)) if score_match else 0
+        critique = re.search(r'CRITIQUE:\s*(.*)', res_text, re.DOTALL).group(1).strip() if "CRITIQUE:" in res_text else "N/A"
+        
+        return {
+            "score": score, 
+            "feedback": critique,
+            "history": state.get('history', []) + [{"attempt": state['attempts'], "score": score, "feedback": critique}]
+        }
+    except Exception as e:
+        return {"score": 0, "feedback": f"Judge Error: {str(e)}", "attempts": state['attempts']}
 
 # --- 5. ORCHESTRATION ---
 workflow = StateGraph(AgentState)
@@ -89,7 +100,6 @@ app_compiled = workflow.compile()
 st.set_page_config(page_title="Synapse-Native Omni", layout="wide")
 st.title("🤖 Synapse-Native: Universal Technical Auditor")
 
-# Persistence
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "online_models" not in st.session_state: st.session_state.online_models = []
 
@@ -103,11 +113,13 @@ with st.sidebar:
                 try:
                     client.models.generate_content(model=m, contents="hi", config={'max_output_tokens': 1})
                     online.append(m)
-                except: continue
+                    st.write(f"🟢 {m}")
+                except:
+                    st.write(f"🔴 {m}")
+                    continue
             st.session_state.online_models = online
             status.update(label=f"Done! {len(online)} Models Online", state="complete")
 
-    # Dynamic Choice: Only shows models that passed the check
     if st.session_state.online_models:
         sel_gen = st.selectbox("Chatting/Parsing Model", st.session_state.online_models, index=0)
         sel_judge = st.selectbox("Judge/Auditing Model", st.session_state.online_models, index=min(1, len(st.session_state.online_models)-1))
@@ -117,18 +129,18 @@ with st.sidebar:
 
     st.divider()
     st.header("📁 2. Upload Context")
-    uploaded_files = st.file_uploader("Upload PDF, Code, Images", accept_multiple_files=True)
+    uploaded_files = st.file_uploader("Upload assets", accept_multiple_files=True)
     if st.button("Clear History"):
         st.session_state.chat_history = []
         st.rerun()
 
-# --- MAIN CHAT INTERFACE ---
+# --- MAIN CHAT ---
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
 if query := st.chat_input("Start Technical Audit..."):
     if not sel_gen or not sel_judge:
-        st.error("Please select models in the sidebar before running.")
+        st.error("Please select models in the sidebar.")
     elif not uploaded_files:
         st.error("Please upload assets for context.")
     else:
@@ -137,7 +149,6 @@ if query := st.chat_input("Start Technical Audit..."):
 
         with st.chat_message("assistant"):
             with st.status("🚀 Agentic Loop running...") as status:
-                # File Handling
                 handles = []
                 for f in uploaded_files:
                     t_path = f"tmp_{uuid.uuid4()}_{f.name}"
@@ -147,7 +158,6 @@ if query := st.chat_input("Start Technical Audit..."):
                     handles.append(h)
                     os.remove(t_path)
 
-                # Execute with chosen models
                 initial_state = {
                     "question": query, "media_handles": handles, "attempts": 0, 
                     "history": [], "score": 0, "feedback": "",
@@ -161,7 +171,9 @@ if query := st.chat_input("Start Technical Audit..."):
                             st.write(f"📝 **{sel_gen}** is drafting analysis...")
                             final_ans = data['answer']
                         elif node == "judge":
-                            st.write(f"⚖️ **{sel_judge}** scored this: **{data['score']}**")
+                            st.write(f"⚖️ **{sel_judge}** scored: **{data['score']}**")
+                            if data['score'] < 9000 and data.get('feedback'):
+                                st.write(f"🔄 Feedback: {data['feedback'][:100]}...")
 
                 status.update(label="✅ Audit Finalized", state="complete")
             
