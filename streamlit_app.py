@@ -13,7 +13,7 @@ load_dotenv()
 API_KEY = os.getenv("GOOGLE_API_KEY") or st.secrets.get("GOOGLE_API_KEY")
 
 if not API_KEY:
-    st.error("Missing API Key. Please check your environment variables.")
+    st.error("Missing API Key.")
     st.stop()
 
 client = genai.Client(api_key=API_KEY)
@@ -44,7 +44,6 @@ FULL_MODEL_LIST = [
     "gemini-pro-latest"
 ]
 
-# Corrected Safety Settings for GenAI SDK
 safety_config = [
     types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
     types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
@@ -55,44 +54,32 @@ safety_config = [
 # --- 4. NODE LOGIC ---
 def universal_generator_node(state: AgentState):
     revision = f"\nPREVIOUS FEEDBACK: {state['feedback']}" if state.get('feedback') else ""
-    content_parts = [
-        "SYSTEM: You are a Technical Auditor. Analyze the files strictly.",
-        *state['media_handles'],
-        f"USER QUERY: {state['question']} {revision}"
-    ]
+    content_parts = ["SYSTEM: Technical Auditor.", *state['media_handles'], f"{state['question']} {revision}"]
     try:
         response = client.models.generate_content(
-            model=state['gen_model'], 
-            contents=content_parts,
+            model=state['gen_model'], contents=content_parts,
             config=types.GenerateContentConfig(safety_settings=safety_config)
         )
         return {"answer": response.text, "attempts": state['attempts'] + 1}
     except Exception as e:
-        return {"answer": f"⚠️ Generator Error: {str(e)}", "attempts": state['attempts'] + 1}
+        return {"answer": f"⚠️ Error: {str(e)}", "attempts": state['attempts'] + 1}
 
 def judge_node(state: AgentState):
-    eval_prompt = (
-        f"Critically audit this response. Return SCORE: [0-10000] and CRITIQUE: [text].\n\n"
-        f"USER QUERY: {state['question']}\n"
-        f"RESPONSE TO AUDIT: {state['answer']}"
-    )
+    eval_prompt = f"SCORE: [0-10000] CRITIQUE: [text]\n\nRESPONSE: {state['answer']}"
     try:
         response = client.models.generate_content(
-            model=state['judge_model'], 
-            contents=[eval_prompt],
+            model=state['judge_model'], contents=[eval_prompt],
             config=types.GenerateContentConfig(safety_settings=safety_config)
         )
         score_match = re.search(r'SCORE:\s*(\d+)', response.text)
         score = int(score_match.group(1)) if score_match else 0
         return {
-            "score": score, 
-            "feedback": response.text,
-            "history": state.get('history', []) + [{"attempt": state['attempts'], "score": score}]
+            "score": score, "feedback": response.text,
+            "history": state.get('history', []) + [{"attempt": state['attempts'], "score": score, "critique": response.text}]
         }
     except Exception as e:
         return {"score": 0, "feedback": f"Judge Error: {str(e)}"}
 
-# --- 5. ORCHESTRATION ---
 workflow = StateGraph(AgentState)
 workflow.add_node("generator", universal_generator_node)
 workflow.add_node("judge", judge_node)
@@ -111,26 +98,22 @@ if "test_run_complete" not in st.session_state: st.session_state.test_run_comple
 
 with st.sidebar:
     st.header("⚙️ 1. Model Configuration")
-    
     if st.button("🔍 Diagnostic: Test Connectivity"):
-        with st.status("Initializing 10s Timeout Probe...") as status:
+        with st.status("Testing Models...") as status:
             online = []
             for i, m in enumerate(FULL_MODEL_LIST):
-                status.update(label=f"Testing [{i:02d}] models/{m}...", state="running")
                 try:
                     llm = ChatGoogleGenerativeAI(model=m, google_api_key=API_KEY, timeout=10, max_retries=0)
                     llm.invoke([HumanMessage(content="Hi")])
                     online.append(m)
-                    st.write(f"🟢 [{i:02d}] {m} SUCCESS")
-                except:
-                    st.write(f"🔴 [{i:02d}] {m} FAILED")
+                    st.write(f"🟢 {m}")
+                except: continue
             st.session_state.online_models = online
             st.session_state.test_run_complete = True
             st.rerun()
 
-    # Dynamic List Handling
     display_list = st.session_state.online_models if st.session_state.test_run_complete else FULL_MODEL_LIST
-    test_key = "online_v5" if st.session_state.test_run_complete else "full_v5"
+    test_key = "online_v6" if st.session_state.test_run_complete else "full_v6"
     
     if display_list:
         sel_gen = st.selectbox("Chatting/Parsing Model", display_list, index=0, key=f"gen_{test_key}")
@@ -140,10 +123,17 @@ with st.sidebar:
     st.header("📁 2. Upload Context")
     uploaded_files = st.file_uploader("Upload assets", accept_multiple_files=True)
 
-# --- CHAT INTERFACE ---
+# --- RENDERING ENGINE ---
 for msg in st.session_state.chat_history:
-    with st.chat_message(msg["role"]): st.markdown(msg["content"])
+    with st.chat_message(msg["role"]):
+        # Check if there are preserved logs for this specific message
+        if "audit_logs" in msg:
+            for log in msg["audit_logs"]:
+                with st.expander(f"⚖️ Audit Attempt {log['attempt']} | Score: {log['score']}/10000"):
+                    st.markdown(log["critique"])
+        st.markdown(msg["content"])
 
+# --- PROCESSING ENGINE ---
 if query := st.chat_input("Start Technical Audit..."):
     if not uploaded_files:
         st.error("Please upload context files.")
@@ -152,8 +142,8 @@ if query := st.chat_input("Start Technical Audit..."):
         with st.chat_message("user"): st.markdown(query)
 
         with st.chat_message("assistant"):
-            # Placeholder for the final result
-            response_container = st.container()
+            current_audit_logs = [] # Temp storage for this specific run
+            response_placeholder = st.empty()
             
             with st.status("🚀 Agentic Loop Processing...") as status:
                 handles = []
@@ -175,12 +165,24 @@ if query := st.chat_input("Start Technical Audit..."):
                             final_ans = data.get('answer', "")
                             st.write(f"📝 Attempt {data.get('attempts')} generated.")
                         if node == "judge":
-                            score = data.get('score', 0)
-                            st.write(f"⚖️ **Audit Score: {score}/10000**")
-                            with st.expander(f"View Critique (Attempt {len(data.get('history', []))})"):
-                                st.markdown(data.get('feedback', ""))
-
+                            # Store the log for persistence
+                            log_entry = {
+                                "attempt": data.get('attempts', 0),
+                                "score": data.get('score', 0),
+                                "critique": data.get('feedback', "")
+                            }
+                            current_audit_logs.append(log_entry)
+                            
+                            # Immediate UI feedback
+                            st.write(f"⚖️ **Score: {log_entry['score']}/10000**")
+                
                 status.update(label="✅ Audit Finalized", state="complete")
             
-            response_container.markdown(final_ans)
-            st.session_state.chat_history.append({"role": "assistant", "content": final_ans})
+            response_placeholder.markdown(final_ans)
+            
+            # Save the final answer AND the collected logs to session state
+            st.session_state.chat_history.append({
+                "role": "assistant", 
+                "content": final_ans,
+                "audit_logs": current_audit_logs # THIS PRESERVES THE JUDGE DATA
+            })
