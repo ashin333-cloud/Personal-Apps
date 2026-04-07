@@ -13,7 +13,7 @@ load_dotenv()
 API_KEY = os.getenv("GOOGLE_API_KEY") or st.secrets.get("GOOGLE_API_KEY")
 
 if not API_KEY:
-    st.error("Missing API Key. Check .env or Streamlit Secrets.")
+    st.error("Missing API Key.")
     st.stop()
 
 client = genai.Client(api_key=API_KEY)
@@ -30,7 +30,7 @@ class AgentState(TypedDict):
     gen_model: str 
     judge_model: str 
 
-# --- 3. VERIFIED 2026 MODEL LIST ---
+# --- 3. FULL MODEL LIST ---
 FULL_MODEL_LIST = [
     "gemini-2.0-flash", "gemini-2.0-flash-001", "gemini-2.0-flash-lite",
     "gemini-2.0-flash-lite-001", "gemini-2.0-flash-exp-image-generation",
@@ -52,47 +52,29 @@ safety_config = [
 ]
 
 # --- 4. NODE LOGIC ---
-
 def universal_generator_node(state: AgentState):
-    revision = f"\nPREVIOUS FEEDBACK: {state['feedback']}" if state.get('feedback') else ""
-    content_parts = [
-        "SYSTEM: You are a Technical Auditor. Analyze the files strictly.",
-        *state['media_handles'],
-        f"USER QUERY: {state['question']} {revision}"
-    ]
+    content_parts = ["SYSTEM: Technical Auditor.", *state['media_handles'], state['question']]
     try:
         response = client.models.generate_content(
-            model=state['gen_model'], 
-            contents=content_parts,
+            model=state['gen_model'], contents=content_parts,
             config=types.GenerateContentConfig(safety_settings=safety_config)
         )
         return {"answer": response.text, "attempts": state['attempts'] + 1}
     except Exception as e:
-        return {"answer": f"⚠️ Generator Error: {str(e)}", "attempts": state['attempts'] + 1}
+        return {"answer": f"⚠️ Error: {str(e)}", "attempts": state['attempts'] + 1}
 
 def judge_node(state: AgentState):
-    eval_prompt = (
-        f"Critically audit this response. Return SCORE: [0-10000] and CRITIQUE: [text].\n\n"
-        f"USER QUERY: {state['question']}\n"
-        f"RESPONSE TO AUDIT: {state['answer']}"
-    )
+    eval_prompt = f"SCORE: [0-10000] CRITIQUE: [text]\n\nRESPONSE: {state['answer']}"
     try:
         response = client.models.generate_content(
-            model=state['judge_model'], 
-            contents=[eval_prompt],
+            model=state['judge_model'], contents=[eval_prompt],
             config=types.GenerateContentConfig(safety_settings=safety_config)
         )
         score_match = re.search(r'SCORE:\s*(\d+)', response.text)
-        score = int(score_match.group(1)) if score_match else 0
-        critique = re.search(r'CRITIQUE:\s*(.*)', response.text, re.DOTALL).group(1).strip() if "CRITIQUE:" in response.text else "N/A"
-        return {
-            "score": score, "feedback": critique,
-            "history": state.get('history', []) + [{"attempt": state['attempts'], "score": score, "feedback": critique}]
-        }
-    except Exception as e:
-        return {"score": 0, "feedback": f"Judge Error: {str(e)}", "attempts": state['attempts']}
+        return {"score": int(score_match.group(1)) if score_match else 0, "feedback": response.text}
+    except:
+        return {"score": 0, "feedback": "Judge Error"}
 
-# --- 5. ORCHESTRATION ---
 workflow = StateGraph(AgentState)
 workflow.add_node("generator", universal_generator_node)
 workflow.add_node("judge", judge_node)
@@ -103,7 +85,6 @@ app_compiled = workflow.compile()
 
 # --- 6. STREAMLIT UI ---
 st.set_page_config(page_title="Synapse-Native Omni", layout="wide")
-st.title("🤖 Synapse-Native: Universal Technical Auditor")
 
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "online_models" not in st.session_state: st.session_state.online_models = []
@@ -118,57 +99,53 @@ with st.sidebar:
             for i, m in enumerate(FULL_MODEL_LIST):
                 status.update(label=f"Testing [{i:02d}] {m}...", state="running")
                 try:
-                    # Using the exact logic from your original code
-                    llm = ChatGoogleGenerativeAI(
-                        model=m,
-                        google_api_key=API_KEY,
-                        timeout=10, # 10 second timeout per model
-                        max_retries=0
-                    )
+                    llm = ChatGoogleGenerativeAI(model=m, google_api_key=API_KEY, timeout=10, max_retries=0)
                     llm.invoke([HumanMessage(content="Hi")])
                     online.append(m)
                     st.write(f"🟢 [{i:02d}] {m} SUCCESS")
                 except:
-                    st.write(f"🔴 [{i:02d}] {m} FAILED/TIMEOUT")
-                    continue
-            
+                    st.write(f"🔴 [{i:02d}] {m} FAILED")
             st.session_state.online_models = online
             st.session_state.test_run_complete = True
-            status.update(label=f"Done! {len(online)} Models Online", state="complete")
             st.rerun()
 
-    # REACTION LOGIC: Filtering both lists
-    if st.session_state.test_run_complete and st.session_state.online_models:
+    # --- DYNAMIC FILTERING ---
+    if st.session_state.test_run_complete:
         display_list = st.session_state.online_models
         st.success(f"Verified {len(display_list)} models online.")
     else:
         display_list = FULL_MODEL_LIST
-        st.info("Showing all models (Test Optional)")
+        st.info("Test Optional: All Models Visible")
 
-    # FIX: Using distinct keys and dynamic index to ensure visibility in both dropdowns
-    sel_gen = st.selectbox("Chatting/Parsing Model", display_list, index=0, key="gen_select")
-    
-    # Selection logic for Judge: Default to last item, safely within bounds
-    default_judge_idx = len(display_list) - 1
-    sel_judge = st.selectbox("Judge/Auditing Model", display_list, index=default_judge_idx, key="judge_select")
+    if not display_list:
+        st.error("No models responded. Check API Key.")
+    else:
+        # We use a key that changes after the test to force a fresh render
+        test_key = "online" if st.session_state.test_run_complete else "full"
+        
+        sel_gen = st.selectbox("Chatting/Parsing Model", display_list, index=0, key=f"gen_{test_key}")
+        
+        # Ensure judge doesn't default to a broken index
+        judge_default = len(display_list) - 1
+        sel_judge = st.selectbox("Judge/Auditing Model", display_list, index=judge_idx if (judge_idx := judge_default) >= 0 else 0, key=f"judge_{test_key}")
 
     st.divider()
     st.header("📁 2. Upload Context")
     uploaded_files = st.file_uploader("Upload assets", accept_multiple_files=True)
 
-# --- MAIN CHAT ---
+# --- CHAT INTERFACE ---
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
 if query := st.chat_input("Start Technical Audit..."):
-    if not uploaded_files:
-        st.error("Please upload assets for context.")
+    if not (sel_gen and sel_judge):
+        st.error("Models not ready.")
     else:
         st.session_state.chat_history.append({"role": "user", "content": query})
         with st.chat_message("user"): st.markdown(query)
 
         with st.chat_message("assistant"):
-            with st.status(f"🚀 Audit: {sel_gen} vs {sel_judge}") as status:
+            with st.status(f"🚀 Audit: {sel_gen} + {sel_judge}") as status:
                 handles = []
                 for f in uploaded_files:
                     t_path = f"tmp_{uuid.uuid4()}_{f.name}"
@@ -178,22 +155,10 @@ if query := st.chat_input("Start Technical Audit..."):
                     handles.append(h)
                     os.remove(t_path)
 
-                initial_state = {
-                    "question": query, "media_handles": handles, "attempts": 0, 
-                    "history": [], "score": 0, "feedback": "",
-                    "gen_model": sel_gen, "judge_model": sel_judge
-                }
-
                 final_ans = ""
-                for output in app_compiled.stream(initial_state):
+                for output in app_compiled.stream({"question": query, "media_handles": handles, "attempts": 0, "gen_model": sel_gen, "judge_model": sel_judge}):
                     for node, data in output.items():
-                        if node == "generator":
-                            st.write(f"📝 **{sel_gen}** analysis step...")
-                            final_ans = data.get('answer', "")
-                        elif node == "judge":
-                            st.write(f"⚖️ **{sel_judge}** score: **{data.get('score', 0)}**")
-
-                status.update(label="✅ Audit Finalized", state="complete")
-            
+                        if node == "generator": final_ans = data.get('answer', "")
+                status.update(label="✅ Finished", state="complete")
             st.markdown(final_ans)
             st.session_state.chat_history.append({"role": "assistant", "content": final_ans})
