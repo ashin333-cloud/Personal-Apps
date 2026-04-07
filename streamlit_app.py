@@ -32,16 +32,8 @@ class AgentState(TypedDict):
 
 # --- 3. FULL MODEL LIST ---
 FULL_MODEL_LIST = [
-    "gemini-2.0-flash", "gemini-2.0-flash-001", "gemini-2.0-flash-lite",
-    "gemini-2.0-flash-lite-001", "gemini-2.0-flash-exp-image-generation",
-    "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite",
-    "gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts",
-    "gemini-2.5-flash-image", "gemini-2.5-flash-lite-preview-09-2025",
-    "gemini-3-flash-preview", "gemini-3-pro-preview", "gemini-3.1-pro-preview",
-    "gemini-3.1-pro-preview-customtools", "gemini-3.1-flash-lite-preview",
-    "gemma-3-1b-it", "gemma-3-4b-it", "gemma-3-12b-it", "gemma-3-27b-it",
-    "gemma-3n-e2b-it", "gemma-3n-e4b-it", "gemini-flash-latest",
-    "gemini-pro-latest"
+    "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro", 
+    "gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-flash-latest", "gemini-pro-latest"
 ]
 
 safety_config = [
@@ -53,7 +45,6 @@ safety_config = [
 
 # --- 4. NODE LOGIC ---
 def universal_generator_node(state: AgentState):
-    # CHANGE: Added instruction to verify structure and persona
     content_parts = [
         "SYSTEM: You are a Technical Auditor. If the user query lacks a proper technical structure or a professional persona, respond ONLY with: 'STRUCTURE_INVALID'. Otherwise, proceed with the audit.",
         *state['media_handles'], 
@@ -69,7 +60,6 @@ def universal_generator_node(state: AgentState):
         return {"answer": f"⚠️ Error: {str(e)}", "attempts": state['attempts'] + 1}
 
 def judge_node(state: AgentState):
-    # CHANGE: Short-circuit if structure was invalid
     if "STRUCTURE_INVALID" in state['answer']:
         return {"score": 10000, "feedback": "Rejected: Invalid structure/persona"}
 
@@ -80,7 +70,12 @@ def judge_node(state: AgentState):
             config=types.GenerateContentConfig(safety_settings=safety_config)
         )
         score_match = re.search(r'SCORE:\s*(\d+)', response.text)
-        return {"score": int(score_match.group(1)) if score_match else 0, "feedback": response.text}
+        score = int(score_match.group(1)) if score_match else 0
+        return {
+            "score": score, 
+            "feedback": response.text,
+            "history": state.get('history', []) + [{"attempt": state['attempts'], "score": score, "critique": response.text}]
+        }
     except:
         return {"score": 0, "feedback": "Judge Error"}
 
@@ -94,6 +89,8 @@ app_compiled = workflow.compile()
 
 # --- 6. STREAMLIT UI ---
 st.set_page_config(page_title="Synapse-Native Omni", layout="wide")
+st.title("🤖 Synapse-Native: Universal Technical Auditor")
+st.markdown("---")
 
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "online_models" not in st.session_state: st.session_state.online_models = []
@@ -101,45 +98,35 @@ if "test_run_complete" not in st.session_state: st.session_state.test_run_comple
 
 with st.sidebar:
     st.header("⚙️ 1. Model Configuration")
-    
     if st.button("🔍 Diagnostic: Test Connectivity"):
-        with st.status("Initializing 10s Timeout Probe...") as status:
+        with st.status("Testing Models...") as status:
             online = []
-            for i, m in enumerate(FULL_MODEL_LIST):
-                status.update(label=f"Testing [{i:02d}] models/{m}...", state="running")
+            for m in FULL_MODEL_LIST:
                 try:
                     llm = ChatGoogleGenerativeAI(model=m, google_api_key=API_KEY, timeout=10, max_retries=0)
                     llm.invoke([HumanMessage(content="Hi")])
                     online.append(m)
-                    st.write(f"🟢 [{i:02d}] {m} SUCCESS")
-                except:
-                    st.write(f"🔴 [{i:02d}] {m} FAILED")
-                    continue
+                except: continue
             st.session_state.online_models = online
             st.session_state.test_run_complete = True
             st.rerun()
 
-    if st.session_state.test_run_complete:
-        display_list = st.session_state.online_models
-        st.success(f"Verified {len(display_list)} models online.")
-    else:
-        display_list = FULL_MODEL_LIST
-        st.info("Test Optional: All Models Visible")
-
-    test_key = "online_v4" if st.session_state.test_run_complete else "full_v4"
-    
-    if display_list:
-        sel_gen = st.selectbox("Chatting/Parsing Model", display_list, index=0, key=f"gen_{test_key}")
-        sel_judge = st.selectbox("Judge/Auditing Model", display_list, index=len(display_list)-1, key=f"judge_{test_key}")
-
-    st.divider()
-    st.header("📁 2. Upload Context")
+    display_list = st.session_state.online_models if st.session_state.test_run_complete else FULL_MODEL_LIST
+    sel_gen = st.selectbox("Chatting/Parsing Model", display_list, index=0)
+    sel_judge = st.selectbox("Judge/Auditing Model", display_list, index=len(display_list)-1)
     uploaded_files = st.file_uploader("Upload assets", accept_multiple_files=True)
 
-# --- CHAT ---
+# --- CHAT RENDERING ---
 for msg in st.session_state.chat_history:
-    with st.chat_message(msg["role"]): st.markdown(msg["content"])
+    with st.chat_message(msg["role"]):
+        if "audit_logs" in msg:
+            for log in msg["audit_logs"]:
+                if log['score'] < 10000:
+                    with st.expander(f"⚖️ Audit Attempt {log['attempt']} | Score: {log['score']}/10000"):
+                        st.markdown(log["critique"])
+        st.markdown(msg["content"])
 
+# --- PROCESSING ---
 if query := st.chat_input("Start Technical Audit..."):
     if not uploaded_files:
         st.error("Please upload context files.")
@@ -148,8 +135,10 @@ if query := st.chat_input("Start Technical Audit..."):
         with st.chat_message("user"): st.markdown(query)
 
         with st.chat_message("assistant"):
-            with st.status("🚀 Processing...") as status:
+            audit_metadata = [] # Temporary container for scores/reasons
+            with st.status("🚀 Initializing Audit...") as status:
                 handles = []
+                status.update(label="📁 Processing context files...", state="running")
                 for f in uploaded_files:
                     t_path = f"tmp_{uuid.uuid4()}_{f.name}"
                     with open(t_path, "wb") as b: b.write(f.getvalue())
@@ -159,15 +148,26 @@ if query := st.chat_input("Start Technical Audit..."):
                     os.remove(t_path)
 
                 final_ans = ""
-                # Initializing attempt at 1 for clearer logging if needed
                 for output in app_compiled.stream({"question": query, "media_handles": handles, "attempts": 1, "gen_model": sel_gen, "judge_model": sel_judge, "feedback": "", "history": []}):
                     for node, data in output.items():
-                        if node == "generator": final_ans = data.get('answer', "")
-                status.update(label="✅ Finished", state="complete")
+                        if node == "generator":
+                            status.update(label=f"📝 Generator: Building Audit (Attempt {data['attempts']})", state="running")
+                            final_ans = data.get('answer', "")
+                        if node == "judge":
+                            score = data.get('score', 0)
+                            status.update(label=f"⚖️ Judge: Scoring Response ({score}/10000)", state="running")
+                            # Preserve the log entry for this session turn
+                            if "history" in data and data["history"]:
+                                audit_metadata.append(data["history"][-1])
+                
+                status.update(label="✅ Audit Finalized", state="complete")
 
-            # Final check to replace the keyword with a polite rejection in the UI
             if "STRUCTURE_INVALID" in final_ans:
                 final_ans = "This query lacks a proper technical structure or persona. Please rephrase your request as a technical audit objective."
                 
             st.markdown(final_ans)
-            st.session_state.chat_history.append({"role": "assistant", "content": final_ans})
+            st.session_state.chat_history.append({
+                "role": "assistant", 
+                "content": final_ans,
+                "audit_logs": audit_metadata # SAVING LOGS TO HISTORY
+            })
